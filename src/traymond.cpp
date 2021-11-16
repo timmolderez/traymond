@@ -14,13 +14,13 @@
 #define SHOW_ALL_ID 0x98
 #define MAXIMUM_WINDOWS 100
 
-// Stores hidden window record.
+// Stores hidden window record - a window handle + its icon
 typedef struct HIDDEN_WINDOW {
   NOTIFYICONDATA icon;
   HWND window;
 } HIDDEN_WINDOW;
 
-// Current execution context
+// Current execution context - seems to be the state of the entire application?
 typedef struct TRCONTEXT {
   HWND mainWindow;
   HIDDEN_WINDOW icons[MAXIMUM_WINDOWS];
@@ -28,12 +28,12 @@ typedef struct TRCONTEXT {
   int iconIndex; // How many windows are currently hidden
 } TRCONTEXT;
 
-HANDLE saveFile;
+HANDLE saveFile; // File handle to store the application's state
 
 // Saves our hidden windows so they can be restored in case
 // of crashing.
 void save(const TRCONTEXT *context) {
-  DWORD numbytes;
+  DWORD numbytes; // A DWORD is just an unsigned long..
   // Truncate file
   SetFilePointer(saveFile, 0, NULL, FILE_BEGIN);
   SetEndOfFile(saveFile);
@@ -62,6 +62,8 @@ void showWindow(TRCONTEXT *context, LPARAM lParam) {
       ShowWindow(context->icons[i].window, SW_SHOW);
       Shell_NotifyIcon(NIM_DELETE, &context->icons[i].icon);
       SetForegroundWindow(context->icons[i].window);
+
+      // Why all this hassle to remove an item from context->icons ?
       context->icons[i] = {};
       std::vector<HIDDEN_WINDOW> temp = std::vector<HIDDEN_WINDOW>(context->iconIndex);
       // Restructure array so there are no holes
@@ -99,10 +101,12 @@ void minimizeToTray(TRCONTEXT *context, long restoreWindow) {
   }
 
   char className[256];
+  // Get the window's class name, and put it into className
   if (!GetClassName(currWin, className, 256)) {
     return;
   }
   else {
+    // Check against restricted windows..
     for (int i = 0; i < sizeof(restrictWins) / sizeof(*restrictWins); i++)
     {
       if (strcmp(restrictWins[i], className) == 0) {
@@ -247,6 +251,14 @@ void startup(TRCONTEXT *context) {
     }
   }
 
+// This is the "window procedure" .. "An application-defined function that processes messages sent to a window"
+// https://docs.microsoft.com/en-us/previous-versions/windows/desktop/legacy/ms633573(v=vs.85)
+// https://stackoverflow.com/questions/17851348/what-do-lresult-wparam-and-lparam-mean#:~:text=LPARAM%20is%20a%20typedef%20for%20LONG_PTR%20which%20is,win32%20and%20unsigned%20__int64%20%28unsigned%2064-bit%29%20on%20x86_64.
+// hwnd: window handler
+// uMsg .. the message that was sent
+// wParam .. word parameter .. for handles and numbers
+// lParam .. long parameter .. for pointers
+
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
   TRCONTEXT* context = reinterpret_cast<TRCONTEXT*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
@@ -254,11 +266,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
   switch (uMsg)
   {
   case WM_ICON:
+    // When a task bar icon (that isn't Traymond) is double-clicked
     if (LOWORD(lParam) == WM_LBUTTONDBLCLK) {
       showWindow(context, lParam);
     }
     break;
   case WM_OURICON:
+    // When release the right-mouse button on the Traymond icon, open the menu
     if (LOWORD(lParam) == WM_RBUTTONUP) {
       SetForegroundWindow(hwnd);
       GetCursorPos(&pt);
@@ -268,6 +282,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     }
     break;
   case WM_COMMAND:
+    // Clicking the different menu options
     if (HIWORD(wParam) == 0) {
       switch LOWORD(wParam) {
       case SHOW_ALL_ID:
@@ -288,6 +303,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
   return 0;
 }
 
+// Traymond's entry point
 #pragma warning( push )
 #pragma warning( disable : 4100 )
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
@@ -311,6 +327,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
   const char CLASS_NAME[] = "Traymond";
 
+  // Define a window class, and then register it so you can create new instances/windows
   WNDCLASS wc = {};
   wc.lpfnWndProc = WindowProc;
   wc.hInstance = hInstance;
@@ -329,6 +346,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
   // Store our context in main window for retrieval by WindowProc
   SetWindowLongPtr(context.mainWindow, GWLP_USERDATA, reinterpret_cast<LONG>(&context));
 
+  // Try to register the one hotkey
   if (!RegisterHotKey(context.mainWindow, 0, MOD_KEY | MOD_NOREPEAT, TRAY_KEY)) {
     MessageBox(NULL, "Error! Could not register the hotkey.", "Traymond", MB_OK | MB_ICONERROR);
     return 1;
@@ -338,12 +356,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
   createTrayMenu(&context.trayMenu);
   startup(&context);
 
+  // No clue what this is for? .. seems to forward messages ..?
+  // Aha, https://en.wikipedia.org/wiki/Message_loop_in_Microsoft_Windows
+  // Seems you need to explicitly add a UI event queue in Windows GUIs..
   while ((bRet = GetMessage(&msg, 0, 0, 0)) != 0)
   {
     if (bRet != -1) {
       DispatchMessage(&msg);
     }
   }
+
   // Clean up on exit;
   showAllWindows(&context);
   Shell_NotifyIcon(NIM_DELETE, &icon);
@@ -353,6 +375,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
   DestroyMenu(context.trayMenu);
   DestroyWindow(context.mainWindow);
   DeleteFile("traymond.dat"); // No save file means we have exited gracefully
-  UnregisterHotKey(context.mainWindow, 0);
+  UnregisterHotKey(context.mainWindow, 0); // I guess this releases all hotkeys bound to that window?
   return msg.wParam;
 }
